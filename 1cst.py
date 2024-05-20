@@ -2,20 +2,25 @@ import io
 import logging
 import logging.handlers
 import os
-import platform
 import signal
 import subprocess
 import sys
 import time
 import traceback
+from logging import Logger, Handler
+from os.path import join, isfile, isdir
+from subprocess import Popen
 
 import click
 
-VERSION = "1cst 1.0.0.4"
+NAME = "1cst"
+VERSION = "1.1.0"
+URL = "https://github.com/bestaford/1cst"
+EXCLUDED_APPS = ["BackgroundJob", "COMConnection"]
+
 LOG_FORMAT = "[%(asctime)s] %(levelname)s: %(message)s"
 LOG_LEVEL = logging.INFO
 LOG_DIR = ""
-EXCLUDED = ["BackgroundJob", "COMConnection"]
 
 
 @click.command()
@@ -27,22 +32,29 @@ EXCLUDED = ["BackgroundJob", "COMConnection"]
               help="terminate all sessions (including COM connections and background jobs)")
 @click.option("--verbose", "-v", "verbose", default=False, flag_value=True, help="verbose mode")
 @click.option("--version", "-V", "version", default=False, flag_value=True, help="display version")
-def main(platform_path, cluster_user, cluster_password, log, terminate_all, verbose, version):
+def main(platform_path, cluster_user, cluster_password, log, terminate_all, verbose, version) -> None:
     """1cst - 1C server session termination"""
+
     if version:
-        click.echo(VERSION)
-        sys.exit(0)
+        click.echo(f"{NAME} {VERSION}\n{URL}")
+        return
+
     if verbose:
         global LOG_LEVEL
         LOG_LEVEL = logging.DEBUG
-    global LOG_DIR
-    LOG_DIR = log
+
+    if log:
+        global LOG_DIR
+        LOG_DIR = log
+
     start_time = time.time()
+
     get_logger().info("Started")
-    command_line = " ".join(sys.argv)
     get_logger().debug(f"Working directory: \"{os.getcwd()}\"")
+    command_line = " ".join(sys.argv)
     get_logger().debug(f"Args: \"{command_line}\"")
-    if os.path.isfile(os.path.join(platform_path, get_executable("ras"))):
+
+    if isfile(get_executable_path(platform_path, "ras")):
         get_logger().info(f"Platform path: {platform_path}")
     else:
         if platform_path:
@@ -53,97 +65,117 @@ def main(platform_path, cluster_user, cluster_password, log, terminate_all, verb
         if platform_path:
             get_logger().info(f"Found the latest version of the platform: \"{platform_path}\"")
         else:
-            get_logger().error("Platform not found, exiting")
-            sys.exit(1)
+            raise Exception("Platform is not found")
+
+    ras = get_executable_path(platform_path, "ras")
+    if not isfile(ras):
+        raise Exception(
+            "RAS was not found in this platform installation, "
+            "please reinstall the platform with server components enabled")
+
+    rac = get_executable_path(platform_path, "rac")
+    if not isfile(rac):
+        raise Exception(
+            "RAC was not found in this platform installation, "
+            "please reinstall the platform with server components enabled")
+
     auth = []
     if cluster_user:
         auth += [f"--cluster-user={cluster_user}"]
     if cluster_password:
         auth += [f"--cluster-pwd={cluster_password}"]
-    ras = os.path.join(platform_path, get_executable("ras"))
-    rac = os.path.join(platform_path, get_executable("rac"))
+
     get_logger().info("Starting RAS")
     ras_process = open_process([ras, "cluster"])
+
     time.sleep(1)
+
     args = [rac, "cluster", "list"]
     for cluster, host, port, name in get_clusters(get_output(open_process(args))):
         get_logger().info(f"Found cluster: [{cluster}, {host}, {port}, {name}]")
         args = [rac, "session", "list", f"--cluster={cluster}"] + auth
         for session, user, client, app in get_sessions(get_output(open_process(args))):
-            if not terminate_all:
-                if app in EXCLUDED:
-                    get_logger().info(f"Ignoring session: [{session}, {client}, {user}, {app}]")
-                    continue
+            if (not terminate_all) and (app in EXCLUDED_APPS):
+                get_logger().info(f"Ignoring session: [{session}, {client}, {user}, {app}]")
+                continue
             get_logger().info(f"Terminating session: [{session}, {client}, {user}, {app}]")
             args = [rac, "session", "terminate", f"--session={session}f", f"--cluster={cluster}"] + auth
             get_output(open_process(args))
+
     time.sleep(1)
+
     get_logger().info("Closing RAS")
     os.kill(ras_process.pid, signal.SIGINT)
+
     end_time = time.time()
     get_logger().info(f"Finished ({end_time - start_time:.2f}s.)")
-    sys.exit(0)
 
 
-def find_platform():
+def find_platform() -> str:
     platform_path = None
     latest_version = 0
     root = get_platform_root()
-    if os.path.isdir(root):
+    if isdir(root):
         for directory in os.listdir(root):
-            if os.path.isdir(os.path.join(root, directory)):
+            if isdir(join(root, directory)):
                 version = directory.replace(".", "")
                 if version.isnumeric():
                     version = int(version)
                     if version > latest_version:
                         latest_version = version
-                        platform_path = os.path.join(root, directory)
+                        platform_path = join(root, directory)
+
     return platform_path
 
 
-def get_platform_root():
-    if platform.system() == "Windows":
-        return os.path.join(os.environ.get("programfiles"), "1cv8")
-    if platform.system() == "Linux":
+def get_platform_root() -> str:
+    if is_windows():
+        return join(os.environ.get("programfiles"), "1cv8")
+    if is_linux():
         return "/opt/1cv8/x86_64"
-    return os.path.dirname(__file__)
 
 
-def get_executable(filename):
-    if platform.system() == "Windows":
-        return os.path.join("bin", filename + ".exe")
-    return filename
+def get_executable_path(platform_path, filename) -> str:
+    if is_windows():
+        return str(join(platform_path, "bin", filename + ".exe"))
+    if is_linux():
+        return str(join(platform_path, filename))
 
 
-def get_encoding():
-    if platform.system() == "Windows":
+def get_encoding() -> str:
+    if is_windows():
         return "cp866"
-    return "utf-8"
+    if is_linux():
+        return "utf-8"
 
 
-def open_process(command):
+def open_process(command) -> Popen:
     command_line = " ".join(command)
     get_logger().debug(f"Opening process: \"{command_line}\"")
-    return subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+
+    return Popen(command, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
 
 
-def get_output(process):
+def get_output(process) -> str:
     file = os.path.split(process.args[0])[1]
     output = ""
     encoding = get_encoding()
+
     for line in io.TextIOWrapper(process.stdout, encoding=encoding):
         line = line.strip()
         if len(line) > 0:
             output = output + line + "\n"
             get_logger().debug(f"{file}: {line}")
+
     return output.strip()
 
 
-def get_clusters(output):
+def get_clusters(output) -> list:
     clusters = []
     cluster = ""
     host = ""
     port = ""
+
     for line in output.splitlines():
         if ":" in line:
             line = line.split(":")
@@ -158,14 +190,16 @@ def get_clusters(output):
             if parameter == "name":
                 name = value
                 clusters.append((cluster, host, port, name))
+
     return clusters
 
 
-def get_sessions(output):
+def get_sessions(output) -> list:
     sessions = []
     session = ""
     user = ""
     client = ""
+
     for line in output.splitlines():
         if ":" in line:
             line = line.split(":")
@@ -180,30 +214,43 @@ def get_sessions(output):
             if parameter == "app-id":
                 app = value
                 sessions.append((session, user, client, app))
+
     return sessions
 
 
-def get_file_handler():
-    file_handler = logging.handlers.RotatingFileHandler(os.path.join(LOG_DIR, "1cst.log"), "a", 5 * 1000 * 1000, 5)
+def get_file_handler() -> Handler:
+    file_handler = logging.handlers.RotatingFileHandler(join(LOG_DIR, f"{NAME}.log"), "a", 5 * 1000 * 1000, 5)
     file_handler.setLevel(LOG_LEVEL)
     file_handler.setFormatter(logging.Formatter(LOG_FORMAT))
+
     return file_handler
 
 
-def get_stream_handler():
+def get_stream_handler() -> Handler:
     stream_handler = logging.StreamHandler()
     stream_handler.setLevel(LOG_LEVEL)
     stream_handler.setFormatter(logging.Formatter(LOG_FORMAT))
+
     return stream_handler
 
 
-def get_logger():
+def get_logger() -> Logger:
     logger = logging.getLogger(__name__)
     logger.setLevel(LOG_LEVEL)
+
     if not logger.hasHandlers():
         logger.addHandler(get_file_handler())
         logger.addHandler(get_stream_handler())
+
     return logger
+
+
+def is_windows() -> bool:
+    return sys.platform == "win32"
+
+
+def is_linux() -> bool:
+    return sys.platform == "linux"
 
 
 if __name__ == "__main__":

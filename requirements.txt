@@ -1,2 +1,2 @@
-git+https://github.com/Bestaford/click.git
+click
 pyinstaller

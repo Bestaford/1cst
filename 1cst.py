@@ -25,14 +25,31 @@ LOG_DIR = ""
 
 @click.command()
 @click.option("--platform-path", "-P", default="", help="platform installation path")
-@click.option("--cluster-user", "-u", default=None, help="cluster administrator")
+@click.option("--cluster-user", "-u", default=None, help="cluster administrator name")
 @click.option("--cluster-password", "-p", default=None, help="cluster administrator password")
+@click.option("--infobase-user", "-iu", default=None, help="infobase administrator name")
+@click.option("--infobase-password", "-ip", default=None, help="infobase administrator password")
 @click.option("--log", "-l", default=os.getcwd(), help="log directory (default is working directory)")
 @click.option("--all", "-a", "terminate_all", default=False, flag_value=True,
               help="terminate all sessions (including COM connections and background jobs)")
+@click.option("--disable-scheduled-tasks", "-d", "disable_scheduled_tasks", default=False, flag_value=True,
+              help="disables scheduled tasks for all infobases found in the cluster before session termination and "
+                   "enables them afterward")
+@click.option("--scheduled-tasks-timeout", "-t", default=60,
+              help="waiting time between disconnecting scheduled tasks and terminating sessions (in seconds)")
 @click.option("--verbose", "-v", "verbose", default=False, flag_value=True, help="verbose mode")
 @click.option("--version", "-V", "version", default=False, flag_value=True, help="display version")
-def main(platform_path, cluster_user, cluster_password, log, terminate_all, verbose, version) -> None:
+def main(platform_path,
+         cluster_user,
+         cluster_password,
+         infobase_user,
+         infobase_password,
+         log,
+         terminate_all,
+         disable_scheduled_tasks,
+         scheduled_tasks_timeout,
+         verbose,
+         version) -> None:
     """1cst - 1C server session termination"""
 
     if version:
@@ -79,28 +96,56 @@ def main(platform_path, cluster_user, cluster_password, log, terminate_all, verb
             "RAC was not found in this platform installation, "
             "please reinstall the platform with server components enabled")
 
-    auth = []
+    cluster_auth = []
     if cluster_user:
-        auth += [f"--cluster-user={cluster_user}"]
+        cluster_auth += [f"--cluster-user={cluster_user}"]
     if cluster_password:
-        auth += [f"--cluster-pwd={cluster_password}"]
+        cluster_auth += [f"--cluster-pwd={cluster_password}"]
+
+    infobase_auth = []
+    if infobase_user:
+        infobase_auth += [f"--infobase-user={infobase_user}"]
+    if infobase_password:
+        infobase_auth += [f"--infobase-pwd={infobase_password}"]
 
     get_logger().info("Starting RAS")
     ras_process = open_process([ras, "cluster"])
 
     time.sleep(1)
 
-    args = [rac, "cluster", "list"]
-    for cluster, host, port, name in get_clusters(get_output(open_process(args))):
-        get_logger().info(f"Found cluster: [{cluster}, {host}, {port}, {name}]")
-        args = [rac, "session", "list", f"--cluster={cluster}"] + auth
-        for session, user, client, app in get_sessions(get_output(open_process(args))):
+    cmd = [rac, "cluster", "list"]
+    for cluster, host, port, cluster_name in get_clusters(get_output(open_process(cmd))):
+        get_logger().info(f"Found cluster: [{cluster}, {host}, {port}, {cluster_name}]")
+
+        cmd = [rac, "infobase", "summary", "list", f"--cluster={cluster}"] + cluster_auth
+        infobases = get_infobases(get_output(open_process(cmd)))
+
+        if disable_scheduled_tasks:
+            for infobase, infobase_name, descr in infobases:
+                get_logger().info(f"Disabling scheduled tasks for infobase: [{infobase}, {infobase_name}, {descr}]")
+                cmd = [rac, "infobase", "update", f"--infobase={infobase}", "--scheduled-jobs-deny=on",
+                       f"--cluster={cluster}"] + cluster_auth + infobase_auth
+                get_output(open_process(cmd))
+
+            get_logger().info(f"Waiting for background jobs to complete ({scheduled_tasks_timeout} seconds)")
+            time.sleep(scheduled_tasks_timeout)
+
+        get_logger().info("Searching for sessions to be terminated")
+        cmd = [rac, "session", "list", f"--cluster={cluster}"] + cluster_auth
+        for session, user, client, app in get_sessions(get_output(open_process(cmd))):
             if (not terminate_all) and (app in EXCLUDED_APPS):
                 get_logger().info(f"Ignoring session: [{session}, {client}, {user}, {app}]")
                 continue
             get_logger().info(f"Terminating session: [{session}, {client}, {user}, {app}]")
-            args = [rac, "session", "terminate", f"--session={session}f", f"--cluster={cluster}"] + auth
-            get_output(open_process(args))
+            cmd = [rac, "session", "terminate", f"--session={session}f", f"--cluster={cluster}"] + cluster_auth
+            get_output(open_process(cmd))
+
+        if disable_scheduled_tasks:
+            for infobase, infobase_name, descr in infobases:
+                get_logger().info(f"Enabling scheduled tasks for infobase: [{infobase}, {infobase_name}, {descr}]")
+                cmd = [rac, "infobase", "update", f"--infobase={infobase}", "--scheduled-jobs-deny=off",
+                       f"--cluster={cluster}"] + cluster_auth + infobase_auth
+                get_output(open_process(cmd))
 
     time.sleep(1)
 
@@ -216,6 +261,27 @@ def get_sessions(output) -> list:
                 sessions.append((session, user, client, app))
 
     return sessions
+
+
+def get_infobases(output) -> list:
+    infobases = []
+    infobase = ""
+    name = ""
+
+    for line in output.splitlines():
+        if ":" in line:
+            line = line.split(":")
+            parameter = line[0].strip()
+            value = line[1].strip()
+            if parameter == "infobase":
+                infobase = value
+            if parameter == "name":
+                name = value
+            if parameter == "descr":
+                descr = value
+                infobases.append((infobase, name, descr))
+
+    return infobases
 
 
 def get_file_handler() -> Handler:

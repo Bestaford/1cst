@@ -14,7 +14,7 @@ from subprocess import Popen
 import click
 
 NAME = "1cst"
-VERSION = "1.1.0"
+VERSION = "1.1.1"
 URL = "https://github.com/bestaford/1cst"
 EXCLUDED_APPS = ["BackgroundJob", "COMConnection"]
 
@@ -24,21 +24,19 @@ LOG_DIR = ""
 
 
 @click.command()
-@click.option("--platform-path", "-P", default="", help="platform installation path")
-@click.option("--cluster-user", "-u", default=None, help="cluster administrator name")
-@click.option("--cluster-password", "-p", default=None, help="cluster administrator password")
-@click.option("--infobase-user", "-iu", default=None, help="infobase administrator name")
-@click.option("--infobase-password", "-ip", default=None, help="infobase administrator password")
-@click.option("--log", "-l", default=os.getcwd(), help="log directory (default is working directory)")
+@click.option("--platform-path", "-P", default="", help="Platform installation path.")
+@click.option("--cluster-user", "-u", default=None, help="Cluster administrator name.")
+@click.option("--cluster-password", "-p", default=None, help="Cluster administrator password.")
+@click.option("--infobase-user", "-iu", default=None, help="Infobase administrator name.")
+@click.option("--infobase-password", "-ip", default=None, help="Infobase administrator password.")
+@click.option("--log", "-l", default=os.getcwd(), help="Log directory (default is working directory).")
 @click.option("--all", "-a", "terminate_all", default=False, flag_value=True,
-              help="terminate all sessions (including COM connections and background jobs)")
-@click.option("--disable-scheduled-tasks", "-d", "disable_scheduled_tasks", default=False, flag_value=True,
-              help="disables scheduled tasks for all infobases found in the cluster before session termination and "
-                   "enables them afterward")
-@click.option("--scheduled-tasks-timeout", "-t", default=60,
-              help="waiting time between disconnecting scheduled tasks and terminating sessions (in seconds)")
-@click.option("--verbose", "-v", "verbose", default=False, flag_value=True, help="verbose mode")
-@click.option("--version", "-V", "version", default=False, flag_value=True, help="display version")
+              help="Terminate all sessions (including COM connections and background jobs).")
+@click.option("--disable-scheduled-tasks", "-d", "disable_scheduled_tasks", default=None,
+              help="If specified, set the \"Blocking of scheduled tasks is enabled\" property for all infobases"
+                   "and exit (possible values: on, off).")
+@click.option("--verbose", "-v", "verbose", default=False, flag_value=True, help="Verbose mode.")
+@click.option("--version", "-V", "version", default=False, flag_value=True, help="Display version and exit.")
 def main(platform_path,
          cluster_user,
          cluster_password,
@@ -47,7 +45,6 @@ def main(platform_path,
          log,
          terminate_all,
          disable_scheduled_tasks,
-         scheduled_tasks_timeout,
          verbose,
          version) -> None:
     """1cst - 1C server session termination"""
@@ -117,34 +114,25 @@ def main(platform_path,
     for cluster, host, port, cluster_name in get_clusters(get_output(open_process(cmd))):
         get_logger().info(f"Found cluster: [{cluster}, {host}, {port}, {cluster_name}]")
 
-        cmd = [rac, "infobase", "summary", "list", f"--cluster={cluster}"] + cluster_auth
-        infobases = get_infobases(get_output(open_process(cmd)))
-
         if disable_scheduled_tasks:
-            for infobase, infobase_name, descr in infobases:
-                get_logger().info(f"Disabling scheduled tasks for infobase: [{infobase}, {infobase_name}, {descr}]")
-                cmd = [rac, "infobase", "update", f"--infobase={infobase}", "--scheduled-jobs-deny=on",
+            cmd = [rac, "infobase", "summary", "list", f"--cluster={cluster}"] + cluster_auth
+            for infobase, infobase_name, descr in get_infobases(get_output(open_process(cmd))):
+                get_logger().info(
+                    f"{'Disabling' if disable_scheduled_tasks == 'on' else 'Enabling'}"
+                    f" scheduled tasks for infobase: [{infobase}, {infobase_name}, {descr}]")
+                cmd = [rac, "infobase", "update", f"--infobase={infobase}",
+                       f"--scheduled-jobs-deny={disable_scheduled_tasks}",
                        f"--cluster={cluster}"] + cluster_auth + infobase_auth
                 get_output(open_process(cmd))
-
-            get_logger().info(f"Waiting for background jobs to complete ({scheduled_tasks_timeout} seconds)")
-            time.sleep(scheduled_tasks_timeout)
-
-        get_logger().info("Searching for sessions to be terminated")
-        cmd = [rac, "session", "list", f"--cluster={cluster}"] + cluster_auth
-        for session, user, client, app in get_sessions(get_output(open_process(cmd))):
-            if (not terminate_all) and (app in EXCLUDED_APPS):
-                get_logger().info(f"Ignoring session: [{session}, {client}, {user}, {app}]")
-                continue
-            get_logger().info(f"Terminating session: [{session}, {client}, {user}, {app}]")
-            cmd = [rac, "session", "terminate", f"--session={session}f", f"--cluster={cluster}"] + cluster_auth
-            get_output(open_process(cmd))
-
-        if disable_scheduled_tasks:
-            for infobase, infobase_name, descr in infobases:
-                get_logger().info(f"Enabling scheduled tasks for infobase: [{infobase}, {infobase_name}, {descr}]")
-                cmd = [rac, "infobase", "update", f"--infobase={infobase}", "--scheduled-jobs-deny=off",
-                       f"--cluster={cluster}"] + cluster_auth + infobase_auth
+        else:
+            get_logger().info("Searching for sessions to be terminated")
+            cmd = [rac, "session", "list", f"--cluster={cluster}"] + cluster_auth
+            for session, user, client, app in get_sessions(get_output(open_process(cmd))):
+                if (not terminate_all) and (app in EXCLUDED_APPS):
+                    get_logger().info(f"Ignoring session: [{session}, {client}, {user}, {app}]")
+                    continue
+                get_logger().info(f"Terminating session: [{session}, {client}, {user}, {app}]")
+                cmd = [rac, "session", "terminate", f"--session={session}f", f"--cluster={cluster}"] + cluster_auth
                 get_output(open_process(cmd))
 
     time.sleep(1)
